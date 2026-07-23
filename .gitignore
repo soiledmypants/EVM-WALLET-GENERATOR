@@ -1,0 +1,5 @@
+node_modules/
+dist/
+vanity-keys-*.txt
+*.key
+.machine-rate.json

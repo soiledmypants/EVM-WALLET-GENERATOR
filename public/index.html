@@ -1,0 +1,279 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; img-src data:; base-uri 'none'; form-action 'none'">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='78' x='50' text-anchor='middle' font-size='80' fill='%23627eea'%3E%E2%97%86%3C/text%3E%3C/svg%3E">
+<title>vanity-evm</title>
+<style>
+  :root{
+    --bg:#0f1126; --panel:#151837; --panel2:#1a1e45; --border:#2b3060;
+    --accent:#627eea; --accent-hi:#8fa4f3; --text:#eef0ff; --muted:#8d93bf;
+    --red:#ff5f5f;
+    --mono:ui-monospace,'Cascadia Code',Consolas,'Courier New',monospace;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:var(--bg);color:var(--text);font-family:var(--mono);min-height:100vh;
+       display:flex;justify-content:center;padding:48px 16px}
+  main{width:100%;max-width:760px}
+  header{display:flex;align-items:baseline;gap:12px}
+  .diamond{color:var(--accent);font-size:28px}
+  h1{font-size:22px;letter-spacing:.12em;font-weight:600}
+  .sub{color:var(--muted);font-size:12px;margin:8px 0 28px;letter-spacing:.05em}
+  .panel{background:var(--panel);border:1px solid var(--border);padding:20px;margin-bottom:16px}
+  label{display:block;font-size:11px;color:var(--muted);letter-spacing:.15em;margin-bottom:6px;text-transform:uppercase}
+  input[type=text]{width:100%;background:var(--bg);border:1px solid var(--border);color:var(--text);
+       font-family:var(--mono);font-size:18px;padding:10px 12px;outline:none}
+  input[type=text]:focus{border-color:var(--accent)}
+  .row{display:flex;flex-wrap:wrap;gap:16px;align-items:center;margin-top:14px}
+  .choice{display:flex;gap:6px;align-items:center;font-size:13px;color:var(--text);cursor:pointer;
+       text-transform:none;letter-spacing:0;margin-bottom:0}
+  input[type=radio],input[type=checkbox]{accent-color:var(--accent)}
+  .estimate{margin-top:14px;padding:10px 12px;background:var(--panel2);border-left:2px solid var(--accent);
+       font-size:13px;color:var(--accent-hi);min-height:38px}
+  .estimate.err{border-left-color:var(--red);color:var(--red)}
+  button{font-family:var(--mono);font-size:13px;letter-spacing:.08em;cursor:pointer;
+       border:1px solid var(--accent);background:var(--accent);color:#fff;padding:10px 22px}
+  button:hover{background:var(--accent-hi);border-color:var(--accent-hi)}
+  button:disabled{opacity:.45;cursor:not-allowed}
+  button.ghost{background:transparent;color:var(--accent-hi)}
+  button.ghost:hover{background:var(--panel2)}
+  button.danger{background:transparent;border-color:var(--red);color:var(--red)}
+  button.danger:hover{background:rgba(255,95,95,.12);border-color:var(--red)}
+  .stats{display:grid;grid-template-columns:repeat(4,1fr);gap:12px}
+  .stats span{display:block;font-size:20px;color:var(--text);margin-bottom:4px;overflow-wrap:anywhere}
+  .bar{height:4px;background:var(--bg);border:1px solid var(--border);margin-top:16px}
+  #barfill{height:100%;width:0%;background:var(--accent)}
+  .kv{margin-top:16px}
+  code{font-family:var(--mono)}
+  .addr-row{display:flex;gap:8px;align-items:center;margin-bottom:6px;flex-wrap:wrap}
+  #address{font-size:19px;color:var(--accent-hi);overflow-wrap:anywhere}
+  #privkey{font-size:14px;color:var(--text);overflow-wrap:anywhere;flex:1;min-width:200px}
+  .copy,.small{padding:6px 12px;font-size:12px}
+  .warn{color:var(--red);font-size:12px;margin:6px 0 10px}
+  .tip{color:var(--muted);font-size:12px;margin-top:14px}
+  footer{color:var(--muted);font-size:11px;text-align:center;margin-top:28px;letter-spacing:.05em}
+  [hidden]{display:none !important}
+  @media (max-width:560px){.stats{grid-template-columns:repeat(2,1fr)}}
+</style>
+</head>
+<body>
+<main>
+  <header><span class="diamond">&#9670;</span><h1>vanity-evm</h1></header>
+  <p class="sub">local vanity address generator &middot; bound to 127.0.0.1 only &middot; keys never leave this machine</p>
+
+  <section class="panel">
+    <label for="pattern">pattern &mdash; hex only (0-9 a-f)</label>
+    <input type="text" id="pattern" spellcheck="false" autocomplete="off" placeholder="c0ffee">
+    <div class="row">
+      <label class="choice"><input type="radio" name="mode" value="prefix" checked> prefix</label>
+      <label class="choice"><input type="radio" name="mode" value="suffix"> suffix</label>
+      <label class="choice"><input type="radio" name="mode" value="contains"> contains</label>
+      <label class="choice"><input type="checkbox" id="checksum"> checksum case (EIP-55)</label>
+    </div>
+    <div class="estimate" id="estimate">type a pattern to see difficulty</div>
+    <div class="row">
+      <button id="generate">&#9670; generate</button>
+      <button id="stopBtn" class="danger" hidden>stop</button>
+    </div>
+  </section>
+
+  <section class="panel" id="progress" hidden>
+    <label>grinding&hellip;</label>
+    <div class="stats">
+      <div><span id="sAttempts">0</span><label>attempts</label></div>
+      <div><span id="sRate">0</span><label>addr / sec</label></div>
+      <div><span id="sElapsed">0s</span><label>elapsed</label></div>
+      <div><span id="sLikely">0%</span><label>chance found</label></div>
+    </div>
+    <div class="bar"><div id="barfill"></div></div>
+  </section>
+
+  <section class="panel" id="result" hidden>
+    <div class="kv" style="margin-top:0">
+      <label>address</label>
+      <div class="addr-row"><code id="address"></code><button class="copy ghost" id="copyAddr">copy</button></div>
+    </div>
+    <div class="kv">
+      <label>private key</label>
+      <div class="warn">anyone who sees this key controls the wallet &mdash; reveal only when no one is watching</div>
+      <div class="addr-row">
+        <code id="privkey"></code>
+        <button class="copy danger" id="reveal">reveal</button>
+        <button class="copy ghost" id="copyKey">copy</button>
+      </div>
+    </div>
+    <div class="kv">
+      <div class="warn" id="saveWarn" hidden>this writes the private key in PLAINTEXT to a file in the project folder &mdash; click again to confirm</div>
+      <div class="addr-row">
+        <button class="small ghost" id="save">save to file&hellip;</button>
+        <code id="savedPath" style="font-size:12px;color:var(--muted)"></code>
+      </div>
+    </div>
+    <p class="tip">tip: send a small test amount and move it back out before using this wallet for anything real.</p>
+  </section>
+
+  <footer>runs entirely on your machine &middot; CSPRNG via viem &middot; no external requests &middot; &#9670;</footer>
+</main>
+<script>
+'use strict';
+const $ = (id) => document.getElementById(id);
+const MASK = '•'.repeat(66);
+
+let running = false;
+let expected = 0;
+let privateKey = null;
+let revealed = false;
+let saveArmed = false;
+let estTimer = null;
+
+const fmtInt = (n) => Math.round(n).toLocaleString('en-US');
+function fmtDur(s) {
+  if (!isFinite(s)) return 'forever';
+  if (s < 1) return '<1s';
+  const u = [['y', 31536000], ['d', 86400], ['h', 3600], ['m', 60], ['s', 1]];
+  const parts = [];
+  let r = Math.round(s);
+  for (const [l, span] of u) {
+    if (r >= span) { parts.push(Math.floor(r / span) + l); r %= span; }
+    if (parts.length === 2) break;
+  }
+  return parts.join(' ');
+}
+function mode() { return document.querySelector('input[name=mode]:checked').value; }
+
+$('privkey').textContent = MASK;
+
+async function refreshEstimate() {
+  const pattern = $('pattern').value.trim();
+  const box = $('estimate');
+  if (!pattern) {
+    box.classList.remove('err');
+    box.textContent = 'type a pattern to see difficulty';
+    $('generate').disabled = running;
+    return;
+  }
+  try {
+    const res = await fetch('/api/estimate?mode=' + mode()
+      + '&pattern=' + encodeURIComponent(pattern)
+      + '&checksum=' + ($('checksum').checked ? '1' : '0'));
+    const d = await res.json();
+    if (!res.ok) {
+      box.classList.add('err');
+      box.textContent = d.error;
+      $('generate').disabled = true;
+      return;
+    }
+    box.classList.remove('err');
+    $('generate').disabled = running;
+    box.textContent = 'expected ~' + fmtInt(d.expected) + ' attempts · ~' + fmtDur(d.seconds)
+      + ' at ' + fmtInt(d.rate) + ' addr/s (50% chance by ~' + fmtDur(d.seconds * 0.69) + ')';
+  } catch (e) {
+    box.classList.add('err');
+    box.textContent = 'backend unreachable — is the server running?';
+  }
+}
+function queueEstimate() { clearTimeout(estTimer); estTimer = setTimeout(refreshEstimate, 200); }
+$('pattern').addEventListener('input', queueEstimate);
+for (const el of document.querySelectorAll('input[name=mode]')) el.addEventListener('change', refreshEstimate);
+$('checksum').addEventListener('change', refreshEstimate);
+
+function jobStarted() {
+  running = true;
+  $('generate').disabled = true;
+  $('stopBtn').hidden = false;
+  $('progress').hidden = false;
+  $('result').hidden = true;
+  $('savedPath').textContent = '';
+  $('saveWarn').hidden = true;
+  saveArmed = false;
+  $('save').textContent = 'save to file…';
+  privateKey = null;
+  revealed = false;
+  $('privkey').textContent = MASK;
+  $('reveal').textContent = 'reveal';
+}
+function jobEnded() {
+  running = false;
+  $('generate').disabled = false;
+  $('stopBtn').hidden = true;
+  refreshEstimate();
+}
+
+const es = new EventSource('/api/stream');
+es.addEventListener('started', (e) => {
+  const d = JSON.parse(e.data);
+  expected = d.expected;
+  jobStarted();
+});
+es.addEventListener('progress', (e) => {
+  const d = JSON.parse(e.data);
+  if (!running) jobStarted(); // page attached mid-run
+  expected = d.expected;
+  $('sAttempts').textContent = fmtInt(d.attempts);
+  $('sRate').textContent = fmtInt(d.rate);
+  $('sElapsed').textContent = fmtDur(d.elapsedMs / 1000);
+  const p = 1 - Math.exp(-d.attempts / d.expected);
+  $('sLikely').textContent = (p * 100).toFixed(p > 0.995 ? 1 : 0) + '%';
+  $('barfill').style.width = (p * 100) + '%';
+});
+es.addEventListener('found', (e) => {
+  const d = JSON.parse(e.data);
+  $('address').textContent = d.address;
+  privateKey = d.privateKey;
+  $('result').hidden = false;
+});
+es.addEventListener('done', jobEnded);
+es.addEventListener('stopped', jobEnded);
+
+$('generate').addEventListener('click', async () => {
+  const res = await fetch('/api/start', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ mode: mode(), pattern: $('pattern').value.trim(), checksum: $('checksum').checked }),
+  });
+  if (!res.ok) {
+    const d = await res.json().catch(() => ({ error: 'request failed' }));
+    const box = $('estimate');
+    box.classList.add('err');
+    box.textContent = d.error || 'request failed';
+  }
+});
+$('stopBtn').addEventListener('click', () => fetch('/api/stop', { method: 'POST' }));
+
+$('reveal').addEventListener('click', () => {
+  revealed = !revealed;
+  $('privkey').textContent = revealed ? (privateKey || '') : MASK;
+  $('reveal').textContent = revealed ? 'hide' : 'reveal';
+});
+function flash(btn) {
+  const t = btn.textContent;
+  btn.textContent = 'copied';
+  setTimeout(() => { btn.textContent = t; }, 900);
+}
+$('copyAddr').addEventListener('click', () => {
+  navigator.clipboard.writeText($('address').textContent).then(() => flash($('copyAddr')));
+});
+$('copyKey').addEventListener('click', () => {
+  if (privateKey) navigator.clipboard.writeText(privateKey).then(() => flash($('copyKey')));
+});
+$('save').addEventListener('click', async () => {
+  if (!saveArmed) {
+    saveArmed = true;
+    $('saveWarn').hidden = false;
+    $('save').textContent = 'really save?';
+    return;
+  }
+  saveArmed = false;
+  $('saveWarn').hidden = true;
+  $('save').textContent = 'save to file…';
+  const res = await fetch('/api/save', { method: 'POST' });
+  const d = await res.json().catch(() => ({}));
+  $('savedPath').textContent = res.ok ? ('saved: ' + d.path) : (d.error || 'save failed');
+});
+
+refreshEstimate();
+</script>
+</body>
+</html>

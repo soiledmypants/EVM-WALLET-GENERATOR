@@ -1,0 +1,27 @@
+{
+  "name": "vanity-evm",
+  "version": "1.0.0",
+  "description": "Local vanity EVM address generator (CLI + localhost-only web UI). CSPRNG only, no network.",
+  "type": "module",
+  "private": true,
+  "engines": {
+    "node": ">=20"
+  },
+  "bin": {
+    "vanity-evm": "dist/cli.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "cli": "node dist/cli.js",
+    "benchmark": "node dist/cli.js --benchmark",
+    "web": "npm run build && node dist/server.js"
+  },
+  "dependencies": {
+    "viem": "^2.21.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.5.0"
+  }
+}

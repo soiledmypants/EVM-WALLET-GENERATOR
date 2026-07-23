@@ -1,0 +1,242 @@
+#!/usr/bin/env node
+import { parseArgs } from 'node:util';
+import { availableParallelism } from 'node:os';
+import {
+  UsageError,
+  describeCriteria,
+  expectedAttempts,
+  validateCriteria,
+  type Criteria,
+  type Mode,
+} from './pattern.js';
+import { formatDuration, formatInt, measureSingleThreadRate, projectedRate } from './estimate.js';
+import { VanityEngine, type FoundKey } from './engine.js';
+import { writeKeyFile } from './save.js';
+import { loadCachedRate, saveCachedRate } from './rate-cache.js';
+
+const CORES = availableParallelism();
+
+const HELP = `vanity-evm — local vanity EVM address generator (CSPRNG only, no network)
+
+USAGE
+  vanity-evm --prefix <hex>     address starts with <hex> (after the 0x)
+  vanity-evm --suffix <hex>     address ends with <hex>
+  vanity-evm --contains <hex>   address contains <hex> anywhere
+  vanity-evm --benchmark        measure this machine's addresses/sec and exit
+
+OPTIONS
+  --checksum       case-sensitive EIP-55 match: letter casing must match your
+                   pattern exactly (digits are unaffected). Roughly 2x harder
+                   per a-f letter in the pattern.
+  --count <n>      keep going until n matches are found (default 1)
+  --workers <n>    worker threads (default: all ${CORES} cores)
+  --save <file>    ALSO write results to <file> in plaintext (loud warning)
+  -h, --help       this text
+
+Patterns may only use hex characters 0-9 a-f.
+Lookalikes for other letters: o→0, i/l→1, z→2, s→5, g→9, t→7.
+
+EXAMPLES
+  vanity-evm --prefix c0ffee
+  vanity-evm --suffix dead --count 3
+  vanity-evm --contains beef
+  vanity-evm --prefix AbCd --checksum
+`;
+
+function fail(message: string): never {
+  console.error(message);
+  process.exit(1);
+}
+
+function parseCliArgs() {
+  try {
+    return parseArgs({
+      options: {
+        prefix: { type: 'string' },
+        suffix: { type: 'string' },
+        contains: { type: 'string' },
+        checksum: { type: 'boolean', default: false },
+        count: { type: 'string', default: '1' },
+        workers: { type: 'string' },
+        save: { type: 'string' },
+        benchmark: { type: 'boolean', default: false },
+        help: { type: 'boolean', short: 'h', default: false },
+      },
+    });
+  } catch (err) {
+    fail(`${err instanceof Error ? err.message : err}\nRun with --help for usage.`);
+  }
+}
+
+const { values } = parseCliArgs();
+
+if (values.help) {
+  console.log(HELP);
+  process.exit(0);
+}
+
+const workers = (() => {
+  if (values.workers === undefined) return CORES;
+  const n = Number.parseInt(values.workers, 10);
+  if (!Number.isInteger(n) || n < 1 || n > 256) fail('--workers must be an integer between 1 and 256');
+  return n;
+})();
+
+if (values.benchmark) {
+  runBenchmark(workers);
+} else {
+  runSearch();
+}
+
+function runSearch(): void {
+  const picked: Array<[Mode, string]> = [];
+  if (values.prefix !== undefined) picked.push(['prefix', values.prefix]);
+  if (values.suffix !== undefined) picked.push(['suffix', values.suffix]);
+  if (values.contains !== undefined) picked.push(['contains', values.contains]);
+  if (picked.length !== 1) {
+    fail('Pass exactly one of --prefix, --suffix, --contains (or --benchmark). See --help.');
+  }
+
+  const count = Number.parseInt(values.count ?? '1', 10);
+  if (!Number.isInteger(count) || count < 1) fail('--count must be a positive integer');
+
+  let criteria: Criteria;
+  try {
+    criteria = validateCriteria({
+      mode: picked[0][0],
+      pattern: picked[0][1],
+      checksum: values.checksum ?? false,
+    });
+  } catch (err) {
+    if (err instanceof UsageError) fail(err.message);
+    throw err;
+  }
+
+  const expectedPer = expectedAttempts(criteria);
+  const expectedTotal = expectedPer * count;
+
+  console.log(`pattern:            ${describeCriteria(criteria)}`);
+  console.log(
+    `expected attempts:  ${formatInt(expectedPer)} per match (50% chance within ${formatInt(expectedPer * 0.693)})`
+  );
+  process.stdout.write('measuring machine:  ');
+  const cached = loadCachedRate();
+  const projected = cached ?? projectedRate(measureSingleThreadRate(), workers);
+  console.log(
+    cached
+      ? `~${formatInt(cached)} addr/s (cached from last measured run)`
+      : `~${formatInt(projected)} addr/s (rough projection — run --benchmark for a real number)`
+  );
+  console.log(
+    `estimated time:     ~${formatDuration(expectedTotal / projected)}${count > 1 ? ` for ${count} matches` : ''}`
+  );
+  console.log('');
+
+  const engine = new VanityEngine(criteria, { workers, count });
+  const results: FoundKey[] = [];
+  const isTTY = process.stderr.isTTY === true;
+
+  const status = setInterval(
+    () => {
+      const rate = engine.rate();
+      const likely = (1 - Math.exp(-engine.attempts / expectedPer)) * 100;
+      const line =
+        `${formatInt(engine.attempts)} attempts | ${formatInt(rate)} addr/s | ` +
+        `${formatDuration(engine.elapsedMs() / 1000)} elapsed | ` +
+        `${likely.toFixed(likely > 99.4 ? 1 : 0)}% chance found by now`;
+      if (isTTY) process.stderr.write(`\r\x1b[2K  ${line}`);
+      else console.error(`  [${new Date().toISOString().slice(11, 19)}] ${line}`);
+    },
+    isTTY ? 500 : 10_000
+  );
+
+  engine.on('error', (err) => {
+    if (isTTY) process.stderr.write('\r\x1b[2K');
+    console.error(`worker error: ${err instanceof Error ? err.message : err}`);
+  });
+
+  engine.on('found', (key: FoundKey) => {
+    results.push(key);
+    if (isTTY) process.stderr.write('\r\x1b[2K');
+    console.log(
+      `match ${results.length}/${count} after ${formatInt(engine.attempts)} attempts (${formatDuration(engine.elapsedMs() / 1000)})`
+    );
+    console.log(`  address:     ${key.address}`);
+    console.log(`  private key: ${key.privateKey}`);
+    console.log('');
+  });
+
+  engine.on('done', () => {
+    clearInterval(status);
+    const seconds = Math.max(engine.elapsedMs() / 1000, 0.001);
+    if (seconds > 3 && engine.attempts > 20_000) saveCachedRate(engine.rate());
+    console.log(
+      `done: ${results.length} match${results.length === 1 ? '' : 'es'} in ${formatInt(engine.attempts)} attempts, ` +
+        `${formatDuration(seconds)} (~${formatInt(engine.attempts / seconds)} addr/s)`
+    );
+    console.log('');
+    console.log('KEEP PRIVATE KEYS SECRET — anyone who has one controls that wallet.');
+    console.log('Send a small test amount first before using a wallet for real funds.');
+    finishSave();
+    process.exit(0);
+  });
+
+  engine.on('stopped', () => {
+    clearInterval(status);
+    console.log(
+      `\nstopped after ${formatInt(engine.attempts)} attempts — ${results.length} match${results.length === 1 ? '' : 'es'} found`
+    );
+    finishSave();
+    process.exit(130);
+  });
+
+  function finishSave(): void {
+    if (!values.save || results.length === 0) return;
+    const path = writeKeyFile(values.save, criteria, results);
+    const bar = '#'.repeat(74);
+    console.log('');
+    console.log(bar);
+    console.log('#  WARNING: PRIVATE KEYS WRITTEN IN PLAINTEXT TO:');
+    console.log(`#    ${path}`);
+    console.log('#  Anyone who can read this file controls these wallets.');
+    console.log('#  Import the keys into a proper wallet, then DELETE this file.');
+    console.log(bar);
+  }
+
+  process.on('SIGINT', () => engine.stop());
+  engine.start();
+}
+
+function runBenchmark(workerCount: number): void {
+  console.log(`benchmark: ${workerCount} workers, 5 seconds...`);
+  // 12 f's = 16^12 expected attempts, will not match during a benchmark
+  const criteria: Criteria = { mode: 'prefix', pattern: 'ffffffffffff', checksum: false };
+  const engine = new VanityEngine(criteria, { workers: workerCount, count: 1 });
+  engine.on('error', () => {});
+  const isTTY = process.stderr.isTTY === true;
+  const status = setInterval(() => {
+    if (isTTY) {
+      process.stderr.write(`\r\x1b[2K  ${formatInt(engine.attempts)} attempts | ${formatInt(engine.rate())} addr/s`);
+    }
+  }, 500);
+  engine.start();
+  setTimeout(() => {
+    clearInterval(status);
+    const seconds = Math.max(engine.elapsedMs() / 1000, 0.001);
+    // rate() uses the trailing window, so worker-startup dead time is excluded
+    const rate = engine.rate();
+    engine.stop();
+    saveCachedRate(rate);
+    if (isTTY) process.stderr.write('\r\x1b[2K');
+    console.log(`workers:   ${workerCount}`);
+    console.log(`attempts:  ${formatInt(engine.attempts)} in ${seconds.toFixed(1)}s (incl. worker startup)`);
+    console.log(`rate:      ${formatInt(rate)} addresses/sec (steady-state, cached for future estimates)`);
+    console.log('');
+    console.log('expected time for a plain hex prefix at this rate:');
+    for (const len of [4, 5, 6, 7, 8, 10]) {
+      const expected = 16 ** len;
+      console.log(`  ${String(len).padStart(2)} chars  ${formatInt(expected).padStart(20)} attempts  ~${formatDuration(expected / rate)}`);
+    }
+    process.exit(0);
+  }, 5000);
+}
