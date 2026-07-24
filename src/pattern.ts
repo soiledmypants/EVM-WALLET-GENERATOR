@@ -115,9 +115,44 @@ function solFirstCharProb(idx: number): number {
 }
 
 /** Alphabet chars a single pattern char can match, honoring ignoreCase. */
-function solCharMatches(ch: string, ignoreCase: boolean): string[] {
+export function solCharMatches(ch: string, ignoreCase: boolean): string[] {
   if (!ignoreCase) return [ch];
   return [...new Set([ch.toLowerCase(), ch.toUpperCase()])].filter((v) => BASE58_SET.has(v));
+}
+
+/**
+ * Cheap prefix pre-filter: which first PUBKEY BYTES can possibly produce an
+ * address starting with one of `chars`. The first base58 char is decided by
+ * the numeric range of the 256-bit pubkey (first char '1' iff byte0 == 0;
+ * otherwise the leading digit of a 43/44-char encoding), so most candidates
+ * can be rejected on byte0 alone, before any base58 encoding. Conservative:
+ * boundary bytes are kept (false positives fall through to the full match),
+ * never false negatives.
+ */
+export function buildFirstByteFilter(chars: string[]): Uint8Array {
+  const allowed = new Uint8Array(256);
+  const CAP = 1n << 256n;
+  const P43 = 58n ** 42n; // scale of the leading digit of a 43-char address
+  const P44 = 58n ** 43n; // scale of the leading digit of a 44-char address
+  for (const ch of chars) {
+    const idx = BigInt(BASE58_ALPHABET.indexOf(ch));
+    if (idx < 0n) continue;
+    if (idx === 0n) {
+      // '1' prefix comes from a leading zero byte and nothing else
+      allowed[0] = 1;
+      continue;
+    }
+    for (const scale of [P43, P44]) {
+      const lo = idx * scale;
+      let hi = (idx + 1n) * scale; // value range [lo, hi)
+      if (lo >= CAP) continue;
+      if (hi > CAP) hi = CAP;
+      const bLo = Number(lo >> 248n);
+      const bHi = Number((hi - 1n) >> 248n);
+      for (let b = bLo; b <= bHi; b++) allowed[b] = 1;
+    }
+  }
+  return allowed;
 }
 
 /**

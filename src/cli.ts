@@ -14,6 +14,7 @@ import { formatDuration, formatInt, measureSingleThreadRate, projectedRate } fro
 import { VanityEngine, type FoundKey } from './engine.js';
 import { writeKeyFile } from './save.js';
 import { loadCachedRate, saveCachedRate } from './rate-cache.js';
+import { createSolKeygen } from './sol-keygen.js';
 
 const CORES = availableParallelism();
 
@@ -242,6 +243,13 @@ function runSearch(): void {
 
 function runBenchmark(benchChain: Chain, workerCount: number): void {
   console.log(`benchmark: ${benchChain}, ${workerCount} workers, 5 seconds...`);
+  if (benchChain === 'sol') {
+    const { keygen, measured } = createSolKeygen(100);
+    const detail = Object.entries(measured)
+      .map(([name, rate]) => `${name} ${formatInt(rate)}/s`)
+      .join(', ');
+    console.log(`keygen:    ${keygen.name} (single-thread: ${detail})`);
+  }
   // patterns chosen to be astronomically unlikely to match during a benchmark
   const criteria: Criteria =
     benchChain === 'sol'

@@ -9,11 +9,11 @@ network calls.**
 ```
 pattern:            sol prefix "kumo" (ignore case)
 expected attempts:  24,372,336 per match (50% chance within 16,890,029)
-measuring machine:  ~70,172 addr/s (cached from last measured sol run)
-estimated time:     ~5m 47s
+measuring machine:  ~763,254 addr/s (cached from last measured sol run)
+estimated time:     ~32s
 
-match 1/1 after 13,353,000 attempts (3m 16s)
-  address:     kuMoXhrh8KJxhRiyR3XfTrZxZmEapecFM5SNAiw4Y3f
+match 1/1 after 44,275,000 attempts (1m 1s)
+  address:     KUmoqSaxefUUBcJio8ECtq98HpGJKUT9DPEXDyjoemU
   private key (base58 — import into Phantom):        ...
   private key (JSON byte array — solana-cli id.json): [...]
 ```
@@ -120,21 +120,30 @@ Both are printed (and saved) for every match — same key, two encodings:
   as e.g. `id.json`, then `solana-keygen pubkey id.json` to verify it matches
   the address, and `solana config set --keypair /path/to/id.json` to use it.
 
-### Solana timing (measured: ~70,000 addr/s on this machine, 16 threads)
+### Solana timing (measured: ~760,000 addr/s on this machine, 16 threads)
+
+Solana keygen is native (libsodium via sodium-native — ~11x faster than the
+previous pure-JS ed25519, ~230x faster than tweetnacl), with preallocated
+buffers in the hot loop, a hand-rolled base58 encoder (cross-checked against
+bs58 at startup), and a first-byte pre-filter that rejects ~99% of candidates
+before encoding in prefix mode. If sodium-native isn't available, it falls
+back to OpenSSL via node's `crypto.generateKeyPairSync` — both are
+benchmarked at startup and the faster one wins.
 
 Case-sensitive prefix, first character in the reachable `2`–`J` range:
 
 | length | expected attempts | time |
 | --- | --- | --- |
-| 3 | 195,112 | ~3 s |
-| 4 | 11,316,496 | ~3 min |
-| 5 | 656,356,768 | ~2.6 h |
-| 6 | 38,068,692,544 | ~6 days |
-| 7 | 2.2 × 10¹² | ~1 year |
+| 3 | 195,112 | <1 s |
+| 4 | 11,316,496 | ~15 s |
+| 5 | 656,356,768 | ~14 min |
+| 6 | 38,068,692,544 | ~14 h |
+| 7 | 2.2 × 10¹² | ~33 days |
+| 8 | 1.3 × 10¹⁴ | ~5 years |
 
-Real examples with `--ignore-case`: `Bull` ≈ 1.6M attempts ≈ 23 s;
-`kumo` ≈ 24M attempts ≈ 6 min (lowercase `k` pays the first-char penalty);
-suffixes avoid the first-char effect entirely (`--suffix moon` ≈ 2.8M ≈ 40 s).
+Real examples with `--ignore-case`: `Bull` ≈ 1.6M attempts ≈ 2 s;
+`kumo` ≈ 24M attempts ≈ 32 s (lowercase `k` pays the first-char penalty);
+suffixes avoid the first-char effect entirely (`--suffix moon` ≈ 2.8M ≈ 4 s).
 
 ## Web UI
 
@@ -167,11 +176,17 @@ Every candidate key is generated **fresh from the OS CSPRNG**:
 
 - **EVM**: viem's `generatePrivateKey()` (backed by `crypto.getRandomValues`),
   address derived with viem's keccak/secp256k1 stack.
-- **Solana**: a fresh 32-byte seed from node `crypto.randomBytes` per attempt,
-  public key via `@noble/curves` ed25519 — the same curve implementation
-  `@solana/web3.js Keypair.generate()` uses. On startup every worker
-  cross-checks noble's derivation against **tweetnacl**'s independent ed25519
-  implementation and refuses to run if they disagree.
+- **Solana**: native ed25519 keygen — libsodium's `crypto_sign_keypair`
+  (sodium-native), whose seeds come from libsodium's `randombytes` OS-CSPRNG;
+  or, as fallback, OpenSSL via node's `crypto.generateKeyPairSync('ed25519')`
+  (seeded by the OS CSPRNG through OpenSSL RAND). **Only the key generation
+  library changed for speed — the randomness source is the OS CSPRNG in every
+  configuration.** Defense in depth: at startup every worker cross-checks the
+  active keygen against two independent ed25519 implementations
+  (`@noble/curves` and tweetnacl) and validates its fast base58 encoder
+  against bs58; and every *found* key is re-verified before being reported by
+  independently re-deriving the public key from the secret's seed and
+  asserting it encodes to the found address.
 
 No seeded PRNGs, no key incrementing, no shared state between attempts.
 
@@ -185,15 +200,17 @@ Profanity-generated hot wallet. Avoid Profanity and its GPU forks entirely.
 ### Verifying this tool is offline
 
 - **Runtime dependencies:** `viem` (EVM key/address math — no RPC transport is
-  ever created), `@noble/curves` (ed25519), `tweetnacl` (independent ed25519
-  cross-check), `bs58` (base58 encoding). All pure math; none can talk to the
-  network.
+  ever created), `sodium-native` (optional; libsodium ed25519), `@noble/curves`
+  and `tweetnacl` (independent ed25519 cross-checks), `bs58` (base58
+  cross-check). All pure crypto math; none can talk to the network.
 - **Grep the source:** the only networking code in `src/` is the localhost HTTP
   server in `server.ts`, bound to `127.0.0.1`:
   ```sh
   grep -rn "fetch\|XMLHttpRequest\|net\.connect\|\.request(" src/
   ```
-- **Audit the tree:** `npm ls --all` — no postinstall scripts, no telemetry.
+- **Audit the tree:** `npm ls --all` — no telemetry. The only install script
+  belongs to `sodium-native` (`node-gyp-build`, the standard loader that picks
+  its prebuilt libsodium binary; it makes no network requests at install).
 - **The ultimate test:** disconnect Wi-Fi/Ethernet and run it. Everything works
   identically because nothing is fetched, ever.
 

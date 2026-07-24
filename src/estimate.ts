@@ -1,19 +1,26 @@
-import { randomBytes } from 'node:crypto';
 import { generatePrivateKey, privateKeyToAddress } from 'viem/accounts';
-import { ed25519 } from '@noble/curves/ed25519.js';
-import bs58 from 'bs58';
 import type { Chain } from './pattern.js';
+import { createSolKeygen } from './sol-keygen.js';
+import { B58_DIGITS_LEN, encode58Fixed } from './base58.js';
 
 /** Measures single-thread key -> address derivations per second for a chain. */
 export function measureSingleThreadRate(chain: Chain, ms = 300): number {
-  const derive =
-    chain === 'sol'
-      ? () => {
-          bs58.encode(ed25519.getPublicKey(randomBytes(32)));
-        }
-      : () => {
-          privateKeyToAddress(generatePrivateKey());
-        };
+  let derive: () => void;
+  if (chain === 'sol') {
+    // same pipeline the sol worker runs: native keygen + fast base58
+    const { keygen } = createSolKeygen(40);
+    const pk = Buffer.alloc(32);
+    const sk = Buffer.alloc(64);
+    const digits = new Uint8Array(B58_DIGITS_LEN);
+    derive = () => {
+      keygen.generate(pk, sk);
+      encode58Fixed(pk, digits);
+    };
+  } else {
+    derive = () => {
+      privateKeyToAddress(generatePrivateKey());
+    };
+  }
   // warmup: curve libraries build precompute tables on first use
   for (let i = 0; i < 30; i++) derive();
   const start = performance.now();
