@@ -7,6 +7,7 @@ import {
   describeCriteria,
   expectedAttempts,
   validateCriteria,
+  type Chain,
   type Criteria,
   type Mode,
 } from './pattern.js';
@@ -18,21 +19,28 @@ import { loadCachedRate, saveCachedRate } from './rate-cache.js';
 const HOST = '127.0.0.1'; // localhost ONLY — never bind 0.0.0.0
 const PORT = 3939;
 const WORKERS = availableParallelism();
+const CHAINS: Chain[] = ['evm', 'sol'];
 
 const indexHtml = readFileSync(new URL('../public/index.html', import.meta.url));
 
 let engine: VanityEngine | null = null;
 let lastCriteria: Criteria | null = null;
 let lastResult: FoundKey | null = null;
-let observedRate = 0;
 
-process.stdout.write('measuring machine rate... ');
-const cachedRate = loadCachedRate();
-const benchmarkRate = cachedRate ?? projectedRate(measureSingleThreadRate(400), WORKERS);
-console.log(
-  `~${Math.round(benchmarkRate).toLocaleString('en-US')} addr/s ` +
-    (cachedRate ? '(cached from last measured run)' : `projected (${WORKERS} workers)`)
-);
+const baseRate: Record<Chain, number> = { evm: 0, sol: 0 };
+const observedRate: Record<Chain, number> = { evm: 0, sol: 0 };
+
+for (const ch of CHAINS) {
+  const cached = loadCachedRate(ch);
+  if (cached) {
+    baseRate[ch] = cached;
+    console.log(`${ch} rate: ~${Math.round(cached).toLocaleString('en-US')} addr/s (cached from last measured run)`);
+  } else {
+    process.stdout.write(`measuring ${ch} rate... `);
+    baseRate[ch] = projectedRate(measureSingleThreadRate(ch, 300), WORKERS);
+    console.log(`~${Math.round(baseRate[ch]).toLocaleString('en-US')} addr/s projected (${WORKERS} workers)`);
+  }
+}
 
 const clients = new Set<http.ServerResponse>();
 
@@ -45,8 +53,8 @@ setInterval(() => {
   for (const res of clients) res.write(': ping\n\n');
 }, 15_000);
 
-function currentRate(): number {
-  return observedRate > 0 ? observedRate : benchmarkRate;
+function currentRate(chain: Chain): number {
+  return observedRate[chain] > 0 ? observedRate[chain] : baseRate[chain];
 }
 
 function json(res: http.ServerResponse, status: number, body: unknown): void {
@@ -78,12 +86,18 @@ function readBody(req: http.IncomingMessage): Promise<unknown> {
   });
 }
 
+function parseChain(value: unknown): Chain {
+  return value === 'sol' ? 'sol' : 'evm';
+}
+
 function startJob(body: Record<string, unknown>): { expected: number } {
   if (engine?.running) throw new UsageError('A job is already running — stop it first.');
   const criteria = validateCriteria({
+    chain: parseChain(body.chain),
     mode: body.mode as Mode,
     pattern: String(body.pattern ?? ''),
     checksum: body.checksum === true,
+    ignoreCase: body.ignoreCase === true,
   });
   const expected = expectedAttempts(criteria);
   const job = new VanityEngine(criteria, { workers: WORKERS, count: 1 });
@@ -91,8 +105,9 @@ function startJob(body: Record<string, unknown>): { expected: number } {
   lastCriteria = criteria;
 
   const progress = setInterval(() => {
-    if (job.attempts > 2000) observedRate = job.rate();
+    if (job.attempts > 2000) observedRate[criteria.chain] = job.rate();
     broadcast('progress', {
+      chain: criteria.chain,
       attempts: job.attempts,
       rate: job.rate(),
       elapsedMs: job.elapsedMs(),
@@ -105,15 +120,17 @@ function startJob(body: Record<string, unknown>): { expected: number } {
     lastResult = key;
     // goes only to SSE clients on 127.0.0.1 — never logged server-side
     broadcast('found', {
+      chain: criteria.chain,
       address: key.address,
       privateKey: key.privateKey,
+      privateKeyJson: key.privateKeyJson,
       attempts: key.attemptsAtFind,
       elapsedMs: job.elapsedMs(),
     });
   });
   job.on('done', () => {
     cleanup();
-    if (job.elapsedMs() > 3000 && job.attempts > 20_000) saveCachedRate(job.rate());
+    if (job.elapsedMs() > 3000 && job.attempts > 20_000) saveCachedRate(criteria.chain, job.rate());
     broadcast('done', { attempts: job.attempts, elapsedMs: job.elapsedMs() });
   });
   job.on('stopped', () => {
@@ -125,7 +142,7 @@ function startJob(body: Record<string, unknown>): { expected: number } {
   });
 
   job.start();
-  broadcast('started', { expected, description: describeCriteria(criteria) });
+  broadcast('started', { chain: criteria.chain, expected, description: describeCriteria(criteria) });
   return { expected };
 }
 
@@ -141,13 +158,16 @@ const server = http.createServer(async (req, res) => {
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
       res.end(indexHtml);
     } else if (req.method === 'GET' && url.pathname === '/api/estimate') {
+      const chain = parseChain(url.searchParams.get('chain'));
       const criteria = validateCriteria({
+        chain,
         mode: (url.searchParams.get('mode') ?? 'prefix') as Mode,
         pattern: url.searchParams.get('pattern') ?? '',
         checksum: url.searchParams.get('checksum') === '1',
+        ignoreCase: url.searchParams.get('ignoreCase') === '1',
       });
       const expected = expectedAttempts(criteria);
-      const rate = currentRate();
+      const rate = currentRate(chain);
       json(res, 200, { expected, rate, seconds: expected / rate, description: describeCriteria(criteria) });
     } else if (req.method === 'GET' && url.pathname === '/api/stream') {
       res.writeHead(200, {
@@ -159,6 +179,7 @@ const server = http.createServer(async (req, res) => {
       if (engine?.running && lastCriteria) {
         res.write(
           `event: started\ndata: ${JSON.stringify({
+            chain: lastCriteria.chain,
             expected: expectedAttempts(lastCriteria),
             description: describeCriteria(lastCriteria),
           })}\n\n`
@@ -196,7 +217,7 @@ const server = http.createServer(async (req, res) => {
 
 server.listen(PORT, HOST, () => {
   console.log('');
-  console.log(`  vanity-evm web UI  ->  http://${HOST}:${PORT}`);
+  console.log(`  vanity web UI (EVM + SOL)  ->  http://${HOST}:${PORT}`);
   console.log('');
   console.log(`  bound to ${HOST} ONLY — not reachable from your network`);
   console.log('  keys are never logged and never written unless you click save');

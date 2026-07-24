@@ -6,6 +6,7 @@ import {
   describeCriteria,
   expectedAttempts,
   validateCriteria,
+  type Chain,
   type Criteria,
   type Mode,
 } from './pattern.js';
@@ -16,31 +17,38 @@ import { loadCachedRate, saveCachedRate } from './rate-cache.js';
 
 const CORES = availableParallelism();
 
-const HELP = `vanity-evm — local vanity EVM address generator (CSPRNG only, no network)
+const HELP = `vanity-evm — local vanity address generator for EVM + Solana (CSPRNG only, no network)
 
 USAGE
-  vanity-evm --prefix <hex>     address starts with <hex> (after the 0x)
-  vanity-evm --suffix <hex>     address ends with <hex>
-  vanity-evm --contains <hex>   address contains <hex> anywhere
-  vanity-evm --benchmark        measure this machine's addresses/sec and exit
+  vanity-evm [evm] --prefix <hex>       EVM: address starts with 0x<hex>
+  vanity-evm sol --prefix <base58>      Solana: address starts with <base58>
+  vanity-evm [evm|sol] --suffix <pat>   address ends with <pat>
+  vanity-evm [evm|sol] --contains <pat> address contains <pat> anywhere
+  vanity-evm [evm|sol] --benchmark      measure this machine's addresses/sec
+
+  The chain defaults to evm, so all pre-existing EVM invocations work as-is.
 
 OPTIONS
-  --checksum       case-sensitive EIP-55 match: letter casing must match your
-                   pattern exactly (digits are unaffected). Roughly 2x harder
-                   per a-f letter in the pattern.
+  --checksum       evm only: case-sensitive EIP-55 match — letter casing must
+                   match your pattern exactly. ~2x harder per a-f letter.
+  --ignore-case    sol only: match any capitalization. Solana addresses are
+                   case-sensitive, so this is much faster for word patterns.
   --count <n>      keep going until n matches are found (default 1)
   --workers <n>    worker threads (default: all ${CORES} cores)
   --save <file>    ALSO write results to <file> in plaintext (loud warning)
   -h, --help       this text
 
-Patterns may only use hex characters 0-9 a-f.
-Lookalikes for other letters: o→0, i/l→1, z→2, s→5, g→9, t→7.
+PATTERN CHARSETS
+  evm  hex: 0-9 a-f. Lookalikes: o→0, i/l→1, z→2, s→5, g→9, t→7.
+  sol  base58: 1-9, A-H J-N P-Z, a-k m-z. Excluded lookalikes: 0→o, O→o,
+       I→i, l→L/1. Case-sensitive unless --ignore-case.
 
 EXAMPLES
   vanity-evm --prefix c0ffee
-  vanity-evm --suffix dead --count 3
-  vanity-evm --contains beef
-  vanity-evm --prefix AbCd --checksum
+  vanity-evm evm --prefix AbCd --checksum
+  vanity-evm sol --prefix kumo --ignore-case
+  vanity-evm sol --suffix moon --count 2
+  vanity-evm sol --benchmark
 `;
 
 function fail(message: string): never {
@@ -51,11 +59,13 @@ function fail(message: string): never {
 function parseCliArgs() {
   try {
     return parseArgs({
+      allowPositionals: true,
       options: {
         prefix: { type: 'string' },
         suffix: { type: 'string' },
         contains: { type: 'string' },
         checksum: { type: 'boolean', default: false },
+        'ignore-case': { type: 'boolean', default: false },
         count: { type: 'string', default: '1' },
         workers: { type: 'string' },
         save: { type: 'string' },
@@ -68,11 +78,25 @@ function parseCliArgs() {
   }
 }
 
-const { values } = parseCliArgs();
+const { values, positionals } = parseCliArgs();
 
 if (values.help) {
   console.log(HELP);
   process.exit(0);
+}
+
+const chain: Chain = (() => {
+  if (positionals.length === 0) return 'evm';
+  const [sub] = positionals;
+  if (positionals.length === 1 && (sub === 'evm' || sub === 'sol')) return sub;
+  fail(`Unknown argument(s): ${positionals.join(' ')} — expected an "evm" or "sol" subcommand. See --help.`);
+})();
+
+if (chain === 'evm' && values['ignore-case']) {
+  fail('--ignore-case applies to sol only. EVM matching is already case-insensitive; use --checksum for exact EIP-55 casing.');
+}
+if (chain === 'sol' && values.checksum) {
+  fail('--checksum applies to evm only. Solana addresses are case-sensitive by default; use --ignore-case to relax that.');
 }
 
 const workers = (() => {
@@ -83,7 +107,7 @@ const workers = (() => {
 })();
 
 if (values.benchmark) {
-  runBenchmark(workers);
+  runBenchmark(chain, workers);
 } else {
   runSearch();
 }
@@ -103,9 +127,11 @@ function runSearch(): void {
   let criteria: Criteria;
   try {
     criteria = validateCriteria({
+      chain,
       mode: picked[0][0],
       pattern: picked[0][1],
       checksum: values.checksum ?? false,
+      ignoreCase: values['ignore-case'] ?? false,
     });
   } catch (err) {
     if (err instanceof UsageError) fail(err.message);
@@ -120,12 +146,12 @@ function runSearch(): void {
     `expected attempts:  ${formatInt(expectedPer)} per match (50% chance within ${formatInt(expectedPer * 0.693)})`
   );
   process.stdout.write('measuring machine:  ');
-  const cached = loadCachedRate();
-  const projected = cached ?? projectedRate(measureSingleThreadRate(), workers);
+  const cached = loadCachedRate(chain);
+  const projected = cached ?? projectedRate(measureSingleThreadRate(chain), workers);
   console.log(
     cached
-      ? `~${formatInt(cached)} addr/s (cached from last measured run)`
-      : `~${formatInt(projected)} addr/s (rough projection — run --benchmark for a real number)`
+      ? `~${formatInt(cached)} addr/s (cached from last measured ${chain} run)`
+      : `~${formatInt(projected)} addr/s (rough projection — run ${chain === 'sol' ? 'sol ' : ''}--benchmark for a real number)`
   );
   console.log(
     `estimated time:     ~${formatDuration(expectedTotal / projected)}${count > 1 ? ` for ${count} matches` : ''}`
@@ -162,14 +188,21 @@ function runSearch(): void {
       `match ${results.length}/${count} after ${formatInt(engine.attempts)} attempts (${formatDuration(engine.elapsedMs() / 1000)})`
     );
     console.log(`  address:     ${key.address}`);
-    console.log(`  private key: ${key.privateKey}`);
+    if (key.privateKeyJson) {
+      console.log(`  private key (base58 — import into Phantom):`);
+      console.log(`    ${key.privateKey}`);
+      console.log(`  private key (JSON byte array — solana-cli id.json):`);
+      console.log(`    ${key.privateKeyJson}`);
+    } else {
+      console.log(`  private key: ${key.privateKey}`);
+    }
     console.log('');
   });
 
   engine.on('done', () => {
     clearInterval(status);
     const seconds = Math.max(engine.elapsedMs() / 1000, 0.001);
-    if (seconds > 3 && engine.attempts > 20_000) saveCachedRate(engine.rate());
+    if (seconds > 3 && engine.attempts > 20_000) saveCachedRate(chain, engine.rate());
     console.log(
       `done: ${results.length} match${results.length === 1 ? '' : 'es'} in ${formatInt(engine.attempts)} attempts, ` +
         `${formatDuration(seconds)} (~${formatInt(engine.attempts / seconds)} addr/s)`
@@ -207,10 +240,13 @@ function runSearch(): void {
   engine.start();
 }
 
-function runBenchmark(workerCount: number): void {
-  console.log(`benchmark: ${workerCount} workers, 5 seconds...`);
-  // 12 f's = 16^12 expected attempts, will not match during a benchmark
-  const criteria: Criteria = { mode: 'prefix', pattern: 'ffffffffffff', checksum: false };
+function runBenchmark(benchChain: Chain, workerCount: number): void {
+  console.log(`benchmark: ${benchChain}, ${workerCount} workers, 5 seconds...`);
+  // patterns chosen to be astronomically unlikely to match during a benchmark
+  const criteria: Criteria =
+    benchChain === 'sol'
+      ? { chain: 'sol', mode: 'prefix', pattern: 'zzzzzzzzzz', checksum: false, ignoreCase: false }
+      : { chain: 'evm', mode: 'prefix', pattern: 'ffffffffffff', checksum: false, ignoreCase: false };
   const engine = new VanityEngine(criteria, { workers: workerCount, count: 1 });
   engine.on('error', () => {});
   const isTTY = process.stderr.isTTY === true;
@@ -226,16 +262,31 @@ function runBenchmark(workerCount: number): void {
     // rate() uses the trailing window, so worker-startup dead time is excluded
     const rate = engine.rate();
     engine.stop();
-    saveCachedRate(rate);
+    saveCachedRate(benchChain, rate);
     if (isTTY) process.stderr.write('\r\x1b[2K');
+    console.log(`chain:     ${benchChain}`);
     console.log(`workers:   ${workerCount}`);
     console.log(`attempts:  ${formatInt(engine.attempts)} in ${seconds.toFixed(1)}s (incl. worker startup)`);
     console.log(`rate:      ${formatInt(rate)} addresses/sec (steady-state, cached for future estimates)`);
     console.log('');
-    console.log('expected time for a plain hex prefix at this rate:');
-    for (const len of [4, 5, 6, 7, 8, 10]) {
-      const expected = 16 ** len;
-      console.log(`  ${String(len).padStart(2)} chars  ${formatInt(expected).padStart(20)} attempts  ~${formatDuration(expected / rate)}`);
+    if (benchChain === 'sol') {
+      console.log('expected time for a case-sensitive base58 prefix at this rate:');
+      for (const len of [3, 4, 5, 6, 7, 8]) {
+        const expected = 58 ** len;
+        console.log(
+          `  ${String(len).padStart(2)} chars  ${formatInt(expected).padStart(20)} attempts  ~${formatDuration(expected / rate)}`
+        );
+      }
+      console.log('(--ignore-case cuts this roughly in half per letter; prefix odds also');
+      console.log(' depend on the first character — only 2-J can start a 44-char address)');
+    } else {
+      console.log('expected time for a plain hex prefix at this rate:');
+      for (const len of [4, 5, 6, 7, 8, 10]) {
+        const expected = 16 ** len;
+        console.log(
+          `  ${String(len).padStart(2)} chars  ${formatInt(expected).padStart(20)} attempts  ~${formatDuration(expected / rate)}`
+        );
+      }
     }
     process.exit(0);
   }, 5000);

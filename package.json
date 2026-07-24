@@ -1,7 +1,7 @@
 {
   "name": "vanity-evm",
   "version": "1.0.0",
-  "description": "Local vanity EVM address generator (CLI + localhost-only web UI). CSPRNG only, no network.",
+  "description": "Local vanity address generator for EVM + Solana (CLI + localhost-only web UI). CSPRNG only, no network.",
   "type": "module",
   "private": true,
   "engines": {
@@ -18,6 +18,9 @@
     "web": "npm run build && node dist/server.js"
   },
   "dependencies": {
+    "@noble/curves": "^2.2.0",
+    "bs58": "^6.0.0",
+    "tweetnacl": "^1.0.3",
     "viem": "^2.21.0"
   },
   "devDependencies": {

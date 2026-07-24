@@ -13,6 +13,7 @@
     --red:#ff5f5f;
     --mono:ui-monospace,'Cascadia Code',Consolas,'Courier New',monospace;
   }
+  body[data-chain=sol]{--accent:#9945FF;--accent-hi:#c39cff}
   *{box-sizing:border-box;margin:0;padding:0}
   body{background:var(--bg);color:var(--text);font-family:var(--mono);min-height:100vh;
        display:flex;justify-content:center;padding:48px 16px}
@@ -20,7 +21,12 @@
   header{display:flex;align-items:baseline;gap:12px}
   .diamond{color:var(--accent);font-size:28px}
   h1{font-size:22px;letter-spacing:.12em;font-weight:600}
-  .sub{color:var(--muted);font-size:12px;margin:8px 0 28px;letter-spacing:.05em}
+  .sub{color:var(--muted);font-size:12px;margin:8px 0 20px;letter-spacing:.05em}
+  .tabs{display:flex;gap:8px;margin-bottom:16px}
+  .tab{background:transparent;border:1px solid var(--border);color:var(--muted);
+       padding:9px 22px;font-size:13px;letter-spacing:.08em}
+  .tab:hover{background:var(--panel);border-color:var(--border);color:var(--text)}
+  .tab.active{border-color:var(--accent);color:var(--text);background:var(--panel)}
   .panel{background:var(--panel);border:1px solid var(--border);padding:20px;margin-bottom:16px}
   label{display:block;font-size:11px;color:var(--muted);letter-spacing:.15em;margin-bottom:6px;text-transform:uppercase}
   input[type=text]{width:100%;background:var(--bg);border:1px solid var(--border);color:var(--text);
@@ -41,6 +47,10 @@
   button.ghost:hover{background:var(--panel2)}
   button.danger{background:transparent;border-color:var(--red);color:var(--red)}
   button.danger:hover{background:rgba(255,95,95,.12);border-color:var(--red)}
+  body[data-chain=sol] #generate{background:linear-gradient(90deg,#9945FF,#14F195);border-color:transparent;color:#0b0d1f;font-weight:600}
+  body[data-chain=sol] #generate:hover{filter:brightness(1.12)}
+  body[data-chain=sol] #generate:disabled{filter:none}
+  body[data-chain=sol] #barfill{background:linear-gradient(90deg,#9945FF,#14F195)}
   .stats{display:grid;grid-template-columns:repeat(4,1fr);gap:12px}
   .stats span{display:block;font-size:20px;color:var(--text);margin-bottom:4px;overflow-wrap:anywhere}
   .bar{height:4px;background:var(--bg);border:1px solid var(--border);margin-top:16px}
@@ -49,7 +59,7 @@
   code{font-family:var(--mono)}
   .addr-row{display:flex;gap:8px;align-items:center;margin-bottom:6px;flex-wrap:wrap}
   #address{font-size:19px;color:var(--accent-hi);overflow-wrap:anywhere}
-  #privkey{font-size:14px;color:var(--text);overflow-wrap:anywhere;flex:1;min-width:200px}
+  #privkey,#privkeyJson{font-size:14px;color:var(--text);overflow-wrap:anywhere;flex:1;min-width:200px}
   .copy,.small{padding:6px 12px;font-size:12px}
   .warn{color:var(--red);font-size:12px;margin:6px 0 10px}
   .tip{color:var(--muted);font-size:12px;margin-top:14px}
@@ -58,19 +68,24 @@
   @media (max-width:560px){.stats{grid-template-columns:repeat(2,1fr)}}
 </style>
 </head>
-<body>
+<body data-chain="evm">
 <main>
-  <header><span class="diamond">&#9670;</span><h1>vanity-evm</h1></header>
+  <header><span class="diamond" id="headerMark">&#9670;</span><h1>vanity-evm</h1></header>
   <p class="sub">local vanity address generator &middot; bound to 127.0.0.1 only &middot; keys never leave this machine</p>
 
+  <nav class="tabs">
+    <button class="tab active" id="tabEvm">&#9670; EVM</button>
+    <button class="tab" id="tabSol">&#9678; SOL</button>
+  </nav>
+
   <section class="panel">
-    <label for="pattern">pattern &mdash; hex only (0-9 a-f)</label>
+    <label for="pattern" id="patternLabel">pattern &mdash; hex only (0-9 a-f)</label>
     <input type="text" id="pattern" spellcheck="false" autocomplete="off" placeholder="c0ffee">
     <div class="row">
       <label class="choice"><input type="radio" name="mode" value="prefix" checked> prefix</label>
       <label class="choice"><input type="radio" name="mode" value="suffix"> suffix</label>
       <label class="choice"><input type="radio" name="mode" value="contains"> contains</label>
-      <label class="choice"><input type="checkbox" id="checksum"> checksum case (EIP-55)</label>
+      <label class="choice"><input type="checkbox" id="caseFlag"> <span id="caseLabel">checksum case (EIP-55)</span></label>
     </div>
     <div class="estimate" id="estimate">type a pattern to see difficulty</div>
     <div class="row">
@@ -96,12 +111,19 @@
       <div class="addr-row"><code id="address"></code><button class="copy ghost" id="copyAddr">copy</button></div>
     </div>
     <div class="kv">
-      <label>private key</label>
+      <label id="keyLabel">private key</label>
       <div class="warn">anyone who sees this key controls the wallet &mdash; reveal only when no one is watching</div>
       <div class="addr-row">
         <code id="privkey"></code>
         <button class="copy danger" id="reveal">reveal</button>
         <button class="copy ghost" id="copyKey">copy</button>
+      </div>
+    </div>
+    <div class="kv" id="keyJsonRow" hidden>
+      <label>private key &middot; json byte array (solana-cli id.json)</label>
+      <div class="addr-row">
+        <code id="privkeyJson"></code>
+        <button class="copy ghost" id="copyKeyJson">copy</button>
       </div>
     </div>
     <div class="kv">
@@ -114,16 +136,35 @@
     <p class="tip">tip: send a small test amount and move it back out before using this wallet for anything real.</p>
   </section>
 
-  <footer>runs entirely on your machine &middot; CSPRNG via viem &middot; no external requests &middot; &#9670;</footer>
+  <footer>runs entirely on your machine &middot; CSPRNG only &middot; no external requests &middot; &#9670; &#9678;</footer>
 </main>
 <script>
 'use strict';
 const $ = (id) => document.getElementById(id);
 const MASK = '•'.repeat(66);
 
+const CHAIN_CFG = {
+  evm: {
+    mark: '◆',
+    placeholder: 'c0ffee',
+    patternLabel: 'pattern — hex only (0-9 a-f)',
+    caseLabel: 'checksum case (EIP-55)',
+    keyLabel: 'private key',
+  },
+  sol: {
+    mark: '◎',
+    placeholder: 'kumo',
+    patternLabel: 'pattern — base58 (no 0 O I l)',
+    caseLabel: 'ignore case',
+    keyLabel: 'private key · base58 (phantom import)',
+  },
+};
+
+let chain = 'evm';
 let running = false;
 let expected = 0;
 let privateKey = null;
+let privateKeyJson = null;
 let revealed = false;
 let saveArmed = false;
 let estTimer = null;
@@ -144,6 +185,24 @@ function fmtDur(s) {
 function mode() { return document.querySelector('input[name=mode]:checked').value; }
 
 $('privkey').textContent = MASK;
+$('privkeyJson').textContent = MASK;
+
+function setChain(c) {
+  chain = c;
+  const cfg = CHAIN_CFG[c];
+  document.body.dataset.chain = c;
+  $('tabEvm').classList.toggle('active', c === 'evm');
+  $('tabSol').classList.toggle('active', c === 'sol');
+  $('headerMark').textContent = cfg.mark;
+  $('generate').textContent = cfg.mark + ' generate';
+  $('patternLabel').textContent = cfg.patternLabel;
+  $('pattern').placeholder = cfg.placeholder;
+  $('caseLabel').textContent = cfg.caseLabel;
+  $('caseFlag').checked = false;
+  refreshEstimate();
+}
+$('tabEvm').addEventListener('click', () => setChain('evm'));
+$('tabSol').addEventListener('click', () => setChain('sol'));
 
 async function refreshEstimate() {
   const pattern = $('pattern').value.trim();
@@ -155,9 +214,10 @@ async function refreshEstimate() {
     return;
   }
   try {
-    const res = await fetch('/api/estimate?mode=' + mode()
+    const flag = $('caseFlag').checked ? '1' : '0';
+    const res = await fetch('/api/estimate?chain=' + chain + '&mode=' + mode()
       + '&pattern=' + encodeURIComponent(pattern)
-      + '&checksum=' + ($('checksum').checked ? '1' : '0'));
+      + (chain === 'evm' ? '&checksum=' + flag : '&ignoreCase=' + flag));
     const d = await res.json();
     if (!res.ok) {
       box.classList.add('err');
@@ -177,7 +237,7 @@ async function refreshEstimate() {
 function queueEstimate() { clearTimeout(estTimer); estTimer = setTimeout(refreshEstimate, 200); }
 $('pattern').addEventListener('input', queueEstimate);
 for (const el of document.querySelectorAll('input[name=mode]')) el.addEventListener('change', refreshEstimate);
-$('checksum').addEventListener('change', refreshEstimate);
+$('caseFlag').addEventListener('change', refreshEstimate);
 
 function jobStarted() {
   running = true;
@@ -185,13 +245,16 @@ function jobStarted() {
   $('stopBtn').hidden = false;
   $('progress').hidden = false;
   $('result').hidden = true;
+  $('keyJsonRow').hidden = true;
   $('savedPath').textContent = '';
   $('saveWarn').hidden = true;
   saveArmed = false;
   $('save').textContent = 'save to file…';
   privateKey = null;
+  privateKeyJson = null;
   revealed = false;
   $('privkey').textContent = MASK;
+  $('privkeyJson').textContent = MASK;
   $('reveal').textContent = 'reveal';
 }
 function jobEnded() {
@@ -205,6 +268,7 @@ const es = new EventSource('/api/stream');
 es.addEventListener('started', (e) => {
   const d = JSON.parse(e.data);
   expected = d.expected;
+  if (d.chain && d.chain !== chain) setChain(d.chain);
   jobStarted();
 });
 es.addEventListener('progress', (e) => {
@@ -222,6 +286,9 @@ es.addEventListener('found', (e) => {
   const d = JSON.parse(e.data);
   $('address').textContent = d.address;
   privateKey = d.privateKey;
+  privateKeyJson = d.privateKeyJson || null;
+  $('keyLabel').textContent = CHAIN_CFG[d.chain === 'sol' ? 'sol' : 'evm'].keyLabel;
+  $('keyJsonRow').hidden = !privateKeyJson;
   $('result').hidden = false;
 });
 es.addEventListener('done', jobEnded);
@@ -231,7 +298,13 @@ $('generate').addEventListener('click', async () => {
   const res = await fetch('/api/start', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ mode: mode(), pattern: $('pattern').value.trim(), checksum: $('checksum').checked }),
+    body: JSON.stringify({
+      chain,
+      mode: mode(),
+      pattern: $('pattern').value.trim(),
+      checksum: chain === 'evm' && $('caseFlag').checked,
+      ignoreCase: chain === 'sol' && $('caseFlag').checked,
+    }),
   });
   if (!res.ok) {
     const d = await res.json().catch(() => ({ error: 'request failed' }));
@@ -245,6 +318,7 @@ $('stopBtn').addEventListener('click', () => fetch('/api/stop', { method: 'POST'
 $('reveal').addEventListener('click', () => {
   revealed = !revealed;
   $('privkey').textContent = revealed ? (privateKey || '') : MASK;
+  $('privkeyJson').textContent = revealed ? (privateKeyJson || '') : MASK;
   $('reveal').textContent = revealed ? 'hide' : 'reveal';
 });
 function flash(btn) {
@@ -257,6 +331,9 @@ $('copyAddr').addEventListener('click', () => {
 });
 $('copyKey').addEventListener('click', () => {
   if (privateKey) navigator.clipboard.writeText(privateKey).then(() => flash($('copyKey')));
+});
+$('copyKeyJson').addEventListener('click', () => {
+  if (privateKeyJson) navigator.clipboard.writeText(privateKeyJson).then(() => flash($('copyKeyJson')));
 });
 $('save').addEventListener('click', async () => {
   if (!saveArmed) {

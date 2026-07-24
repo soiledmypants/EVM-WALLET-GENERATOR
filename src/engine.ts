@@ -5,6 +5,8 @@ import type { Criteria } from './pattern.js';
 export interface FoundKey {
   address: string;
   privateKey: string;
+  /** SOL only: the secret key as a JSON byte array (solana-cli id.json format) */
+  privateKeyJson?: string;
   attemptsAtFind: number;
 }
 
@@ -18,6 +20,7 @@ interface WorkerMessage {
   attempts?: number;
   address?: string;
   privateKey?: string;
+  privateKeyJson?: string;
 }
 
 /**
@@ -70,6 +73,7 @@ export class VanityEngine extends EventEmitter {
       const key: FoundKey = {
         address: m.address,
         privateKey: m.privateKey,
+        privateKeyJson: m.privateKeyJson,
         attemptsAtFind: this.attempts,
       };
       this.found.push(key);

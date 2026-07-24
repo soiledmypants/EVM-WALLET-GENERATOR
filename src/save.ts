@@ -15,7 +15,16 @@ export function writeKeyFile(file: string, criteria: Criteria, results: FoundKey
     '',
   ];
   results.forEach((r, i) => {
-    lines.push(`# match ${i + 1}`, `address:     ${r.address}`, `private key: ${r.privateKey}`, '');
+    lines.push(`# match ${i + 1}`, `address:     ${r.address}`);
+    if (r.privateKeyJson) {
+      lines.push(
+        `private key (base58 — import into Phantom):          ${r.privateKey}`,
+        `private key (JSON byte array — solana-cli id.json):  ${r.privateKeyJson}`
+      );
+    } else {
+      lines.push(`private key: ${r.privateKey}`);
+    }
+    lines.push('');
   });
   lines.push(
     'Reminder: send a small test amount and confirm you can move it back out',
